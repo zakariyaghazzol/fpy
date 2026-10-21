@@ -2,7 +2,7 @@ name: fprime-fpy tests
 
 on:
   push:
-    branches: [ devel ]
+    branches: [ devel, codex/fork-unit-tests-270 ]
   pull_request:
     # The branches below must be a subset of the branches above
     branches: [ devel ]
@@ -14,6 +14,8 @@ concurrency:
 jobs:
   Unit-tests:
 
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     strategy:
       matrix:
