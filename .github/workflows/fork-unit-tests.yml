@@ -1,0 +1,113 @@
+name: Fork unit tests
+run-name: Fork tests - ${{ github.event.workflow_run.head_branch || 'all open Fpy PRs' }}
+
+on:
+  # Feature branches already run Spell checking on push. Its result does not
+  # decide whether unit tests run; it only identifies the commit to test.
+  workflow_run:
+    workflows: [Spell checking]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-tests-${{ github.event.workflow_run.head_branch || 'open-prs' }}
+  cancel-in-progress: true
+
+jobs:
+  select:
+    if: >-
+      github.repository == 'zakariyaghazzol/fpy' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_repository.full_name == github.repository))
+    runs-on: ubuntu-latest
+    outputs:
+      targets: ${{ steps.targets.outputs.targets }}
+    steps:
+      - name: Select exact commits
+        id: targets
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import urllib.request
+
+          repository = os.environ["GITHUB_REPOSITORY"]
+          if os.environ["GITHUB_EVENT_NAME"] == "workflow_run":
+              with open(os.environ["GITHUB_EVENT_PATH"]) as event_file:
+                  event = json.load(event_file)
+              run = event["workflow_run"]
+              assert run["event"] == "push"
+              assert run["head_repository"]["full_name"] == repository
+              targets = [{"label": run["head_branch"], "sha": run["head_sha"]}]
+          else:
+              # Public PR metadata is sufficient; do not send a token upstream.
+              targets = []
+              page = 1
+              while True:
+                  url = (
+                      "https://api.github.com/repos/fprime-community/fpy/pulls"
+                      f"?state=open&per_page=100&page={page}"
+                  )
+                  request = urllib.request.Request(
+                      url, headers={"Accept": "application/vnd.github+json"}
+                  )
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      pull_requests = json.load(response)
+                  for pr in pull_requests:
+                      head_repository = pr["head"]["repo"]
+                      if (
+                          pr["user"]["login"] == "zakariyaghazzol"
+                          and head_repository is not None
+                          and head_repository["full_name"] == repository
+                      ):
+                          targets.append({
+                              "label": f"PR {pr['number']} - {pr['head']['ref']}",
+                              "sha": pr["head"]["sha"],
+                          })
+                  if len(pull_requests) < 100:
+                      break
+                  page += 1
+
+          assert targets, "No matching commits were found"
+          assert len(targets) <= 64, "The four-version matrix would exceed 256 jobs"
+          assert all(re.fullmatch(r"[0-9a-f]{40}", target["sha"]) for target in targets)
+          print(json.dumps(targets, indent=2))
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("targets=" + json.dumps(targets) + "\n")
+          PY
+
+  unit-tests:
+    needs: select
+    name: ${{ matrix.target.label }} / Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.select.outputs.targets) }}
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ matrix.target.sha }}
+          persist-credentials: false
+      - name: Show tested commit
+        run: git rev-parse HEAD
+      - name: Check out the fprime submodules
+        run: git submodule update --init test/fprime test/fprime-wasm
+      - name: Set up uv and Python ${{ matrix.python-version }}
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          # Each candidate gets an isolated dependency environment.
+          enable-cache: false
+      - name: Install dependencies
+        run: uv sync --frozen
+      - name: Test with pytest
+        run: uv run --frozen pytest
