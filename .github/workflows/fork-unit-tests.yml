@@ -100,7 +100,7 @@ jobs:
       - name: Show tested commit
         run: git rev-parse HEAD
       - name: Check out the fprime submodules
-        run: git submodule update --init test/fprime test/fprime-wasm
+        run: git submodule update --init
       - name: Set up uv and Python ${{ matrix.python-version }}
         uses: astral-sh/setup-uv@v5
         with:
